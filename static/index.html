@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CloudHub</title>
+<style>
+:root{--bg:#0f1115;--panel:#181b22;--line:#272c38;--text:#e8eaf0;--muted:#8b93a7;--accent:#5b9dff;--danger:#ff6b6b;--ok:#4cc38a}
+@media (prefers-color-scheme:light){:root{--bg:#f5f6f8;--panel:#fff;--line:#e2e5ec;--text:#1b1f27;--muted:#69718a;--accent:#2563eb;--danger:#d64545;--ok:#1f9d63}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+h1{margin:0;font-size:18px}
+.storage{font-size:13px;color:var(--muted);display:flex;gap:8px;align-items:center}
+select,button{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:7px 11px}
+button{cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+main{max-width:980px;margin:0 auto;padding:16px 16px 120px}
+#crumbs{margin-bottom:12px;color:var(--muted);word-break:break-word}
+#crumbs a{color:var(--accent);text-decoration:none;padding:2px 4px;border-radius:6px}
+.toolbar{display:flex;gap:8px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-bottom:16px}
+.folder{display:flex;align-items:center;gap:10px;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:12px;cursor:pointer}
+.folder:hover{border-color:var(--accent)}
+.folder .ico{font-size:24px}
+.folder .t{flex:1;min-width:0}
+.folder .t b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.folder .t small{color:var(--muted)}
+.mini{padding:3px 7px;font-size:13px;border-radius:6px;background:transparent}
+.file{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:6px}
+.file .ico{font-size:20px}
+.file .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);text-decoration:none}
+.file .name:hover{color:var(--accent)}
+.meta{color:var(--muted);font-size:13px;white-space:nowrap}
+.badge{font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.over{outline:2px dashed var(--accent);outline-offset:2px;background:color-mix(in srgb,var(--accent) 12%,transparent)}
+#empty{color:var(--muted);text-align:center;padding:48px 0}
+#uploads{position:fixed;right:12px;bottom:12px;width:min(340px,calc(100vw - 24px));display:flex;flex-direction:column;gap:6px;z-index:10}
+.up{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 10px;font-size:13px}
+.up .n{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:4px}
+.up progress{width:100%;height:6px}
+.up.ok{border-color:var(--ok)}.up.dup{border-color:var(--muted);opacity:.7}.up.err{border-color:var(--danger)}
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:16px;max-width:min(960px,96vw)}
+dialog::backdrop{background:#000a}
+#viewer video,#viewer img{max-width:100%;max-height:78vh;display:block;margin:auto;border-radius:8px}
+.row{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>☁️ CloudHub</h1>
+  <label class="storage">Upload to: <select id="storage"></select></label>
+</header>
+<main>
+  <nav id="crumbs"></nav>
+  <div class="toolbar">
+    <button id="newFolder">＋ Folder</button>
+    <button id="uploadBtn" class="primary">⬆ Upload</button>
+    <button id="tgImport" hidden>⤓ Import from Telegram</button>
+    <input type="file" id="picker" multiple accept="video/*,image/*" hidden>
+  </div>
+  <section id="folders" class="grid"></section>
+  <section id="files"></section>
+  <div id="empty" hidden>Nothing here yet. Drop files anywhere or click "Upload".</div>
+</main>
+<aside id="uploads"></aside>
+
+<dialog id="viewer">
+  <div id="viewerBody"></div>
+  <div class="row"><button id="viewerClose">Close</button></div>
+</dialog>
+<dialog id="mover">
+  <div>Move to folder:</div>
+  <p><select id="moveSel" style="width:100%"></select></p>
+  <div class="row"><button id="moveCancel">Cancel</button><button id="moveOk" class="primary">Move</button></div>
+</dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+function el(tag, props = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') e.className = v;
+    else if (k === 'text') e.textContent = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  kids.flat().forEach(c => e.append(c));
+  return e;
+}
+async function api(path, method = 'GET', body) {
+  const r = await fetch(path, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) {
+    let m = r.statusText;
+    try { m = (await r.json()).error || m; } catch {}
+    throw new Error(m);
+  }
+  return r.json();
+}
+const guard = fn => async (...a) => { try { await fn(...a); } catch (e) { alert(e.message); } };
+const fmtSize = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB'
+  : n < 1073741824 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1073741824).toFixed(2) + ' GB';
+
+let current = null, storages = [];
+const storageLabel = k => (storages.find(s => s.key === k) || {}).label || k;
+const folderFromHash = () => { const m = location.hash.match(/^#\/(\d+)/); return m ? +m[1] : null; };
+
+async function refresh() {
+  current = folderFromHash();
+  render(await api('/api/list' + (current ? `?folder=${current}` : '')));
+}
+window.addEventListener('hashchange', guard(refresh));
+
+function dropTarget(elm, folderId) {
+  elm.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); elm.classList.add('over'); });
+  elm.addEventListener('dragleave', () => elm.classList.remove('over'));
+  elm.addEventListener('drop', guard(async e => {
+    e.preventDefault(); e.stopPropagation(); elm.classList.remove('over');
+    const id = e.dataTransfer.getData('text/x-file-id');
+    if (id) { await api('/api/files/' + id, 'PATCH', { folder_id: folderId }); await refresh(); }
+    else if (e.dataTransfer.files.length) enqueue([...e.dataTransfer.files], folderId);
+  }));
+}
+
+function render(d) {
+  document.title = (d.breadcrumb.length ? d.breadcrumb.at(-1).name + ' · ' : '') + 'CloudHub';
+  const crumbs = $('#crumbs'); crumbs.replaceChildren();
+  const root = el('a', { href: '#/', text: '🏠 Home' }); dropTarget(root, null); crumbs.append(root);
+  d.breadcrumb.forEach(b => {
+    crumbs.append(' / ');
+    const a = el('a', { href: '#/' + b.id, text: b.name }); dropTarget(a, b.id); crumbs.append(a);
+  });
+
+  const fol = $('#folders'); fol.replaceChildren();
+  d.folders.forEach(f => {
+    const card = el('div', { class: 'folder', onclick: () => { location.hash = '#/' + f.id; } },
+      el('span', { class: 'ico', text: '📁' }),
+      el('div', { class: 't' }, el('b', { text: f.name }), el('small', { text: `${f.files} files · ${f.folders} folders` })),
+      el('button', { class: 'mini', title: 'Rename', text: '✎', onclick: guard(async e => {
+        e.stopPropagation();
+        const n = prompt('New name:', f.name);
+        if (n && n.trim()) { await api('/api/folders/' + f.id, 'PATCH', { name: n }); await refresh(); }
+      }) }),
+      el('button', { class: 'mini', title: 'Delete', text: '🗑', onclick: guard(async e => {
+        e.stopPropagation();
+        if (confirm(`Delete folder "${f.name}" from CloudHub?\nLocal files on disk will be removed; files in Telegram stay untouched.`)) {
+          await api('/api/folders/' + f.id, 'DELETE'); await refresh();
+        }
+      }) }));
+    dropTarget(card, f.id);
+    fol.append(card);
+  });
+
+  const files = $('#files'); files.replaceChildren();
+  d.files.forEach(f => files.append(fileRow(f)));
+  $('#empty').hidden = d.folders.length + d.files.length > 0;
+}
+
+function fileRow(f) {
+  const icon = (f.mime || '').startsWith('video/') ? '🎬' : (f.mime || '').startsWith('image/') ? '🖼️' : '📄';
+  const row = el('div', { class: 'file', draggable: 'true' },
+    el('span', { class: 'ico', text: icon }),
+    el('a', { class: 'name', href: '#', text: f.name, title: f.name, onclick: e => { e.preventDefault(); openFile(f); } }),
+    el('span', { class: 'meta', text: fmtSize(f.size) }),
+    el('span', { class: 'badge', text: storageLabel(f.storage) }),
+    el('button', { class: 'mini', title: 'Move to folder', text: '↦', onclick: guard(() => moveFile(f)) }),
+    el('button', { class: 'mini', title: 'Rename', text: '✎', onclick: guard(async () => {
+      const n = prompt('New name:', f.name);
+      if (n && n.trim()) { await api('/api/files/' + f.id, 'PATCH', { name: n }); await refresh(); }
+    }) }),
+    el('a', { class: 'mini', style: 'text-decoration:none;color:var(--text)', title: 'Download', text: '⬇', href: `/api/files/${f.id}/content?download=1` }),
+    el('button', { class: 'mini', title: 'Delete', text: '🗑', onclick: guard(async () => {
+      const msg = f.storage === 'local'
+        ? `Delete "${f.name}"? The file will also be removed from disk.`
+        : `Remove "${f.name}" from CloudHub? The original file in ${storageLabel(f.storage)} stays untouched.`;
+      if (confirm(msg)) { await api('/api/files/' + f.id, 'DELETE'); await refresh(); }
+    }) }));
+  row.addEventListener('dragstart', e => e.dataTransfer.setData('text/x-file-id', f.id));
+  return row;
+}
+
+function openFile(f) {
+  const url = `/api/files/${f.id}/content`, body = $('#viewerBody'), m = f.mime || '';
+  body.replaceChildren(
+    m.startsWith('video/') ? el('video', { src: url, controls: '', autoplay: '' })
+    : m.startsWith('image/') ? el('img', { src: url })
+    : el('a', { href: url + '?download=1', text: '⬇ Download: ' + f.name }));
+  $('#viewer').showModal();
+}
+$('#viewerClose').onclick = () => $('#viewer').close();
+$('#viewer').addEventListener('close', () => $('#viewerBody').replaceChildren());
+
+async function moveFile(f) {
+  const all = await api('/api/folders/all');
+  const sel = $('#moveSel');
+  sel.replaceChildren(el('option', { value: '', text: '🏠 Home' }), ...all.map(x => el('option', { value: x.id, text: x.path })));
+  sel.value = f.folder_id ?? '';
+  $('#mover').showModal();
+  $('#moveOk').onclick = guard(async () => {
+    await api('/api/files/' + f.id, 'PATCH', { folder_id: sel.value ? +sel.value : null });
+    $('#mover').close(); await refresh();
+  });
+}
+$('#moveCancel').onclick = () => $('#mover').close();
+
+// Upload
+const queue = []; let active = 0; const MAX = 2;
+function uploadFile(file, folderId, storage, onProgress) {
+  return new Promise((res, rej) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (folderId) fd.append('folder_id', folderId);
+    fd.append('storage', storage);
+    fd.append('fingerprint', `${file.name}|${file.size}|${Math.floor(file.lastModified / 1000)}`);
+    const x = new XMLHttpRequest();
+    x.open('POST', '/api/upload');
+    x.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded / e.total);
+    x.onload = () => {
+      if (x.status < 300) return res(JSON.parse(x.responseText));
+      let m = x.statusText; try { m = JSON.parse(x.responseText).error || m; } catch {}
+      rej(new Error(m));
+    };
+    x.onerror = () => rej(new Error('Network error'));
+    x.send(fd);
+  });
+}
+function enqueue(files, folderId) {
+  for (const f of files) {
+    const row = el('div', { class: 'up' }, el('span', { class: 'n', text: f.name }), el('progress', { max: 1, value: 0 }));
+    $('#uploads').append(row);
+    queue.push({ f, folderId, row });
+  }
+  pump();
+}
+function pump() {
+  while (active < MAX && queue.length) {
+    const job = queue.shift(); active++;
+    runJob(job).finally(() => { active--; pump(); });
+  }
+}
+async function runJob(job) {
+  const bar = job.row.querySelector('progress');
+  try {
+    const r = await uploadFile(job.f, job.folderId, $('#storage').value, p => { bar.value = p; });
+    bar.value = 1;
+    job.row.classList.add(r.status === 'duplicate' ? 'dup' : 'ok');
+    if (r.status === 'duplicate') job.row.querySelector('.n').textContent += ' (already exists)';
+    setTimeout(() => job.row.remove(), 4000);
+  } catch (e) {
+    job.row.classList.add('err');
+    job.row.querySelector('.n').textContent += ' — ' + e.message;
+  }
+  if (!queue.length && active === 1) refresh().catch(() => {});
+}
+
+$('#tgImport').onclick = guard(async () => {
+  const btn = $('#tgImport'), label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Reading channel…';
+  try {
+    const r = await api('/api/telegram/import', 'POST', { folder_id: current });
+    alert(`Added ${r.added} new files to this folder\n(Total files in channel: ${r.total})`);
+    await refresh();
+  } finally { btn.disabled = false; btn.textContent = label; }
+});
+$('#uploadBtn').onclick = () => $('#picker').click();
+$('#picker').onchange = e => { enqueue([...e.target.files], current); e.target.value = ''; };
+$('#newFolder').onclick = guard(async () => {
+  const n = prompt('Folder name:');
+  if (n && n.trim()) { await api('/api/folders', 'POST', { name: n, parent_id: current }); await refresh(); }
+});
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  if (e.dataTransfer.files.length) enqueue([...e.dataTransfer.files], current);
+});
+
+// Init
+(async () => {
+  try {
+    storages = await api('/api/storages');
+    $('#storage').replaceChildren(...storages.map(s =>
+      el('option', {
+        value: s.key,
+        text: s.label + (s.enabled ? '' : s.key === 'telegram' ? ' (not connected)' : ' (coming soon)'),
+        ...(s.enabled ? {} : { disabled: '' }),
+      })));
+    $('#tgImport').hidden = !(storages.find(s => s.key === 'telegram') || {}).enabled;
+    await refresh();
+  } catch (e) { alert(e.message); }
+})();
+</script>
+</body>
+</html>

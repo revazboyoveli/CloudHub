@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Database, local media & cache
+hub.db
+storage/
+.cache/
+
+*.session
+*.session-journal
+tg_config.json
+gdrive_config.json
+gdrive_token.json
+.env
