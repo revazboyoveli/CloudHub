@@ -4,6 +4,9 @@ A single web app where all your videos are gathered and organized into folders.
 Files are stored in different storages (Now on hard disk and Telegram, later on Google Drive).
 Every record is saved in a tiny file: hub.db. No paid database is needed.
 
+<img width="1919" height="992" alt="image" src="https://github.com/user-attachments/assets/62e90401-89d6-469a-861d-9e485183d99b" />
+<img width="1919" height="992" alt="image" src="https://github.com/user-attachments/assets/ad4358ac-2af3-4e9b-a2f2-4df35e6c5158" />
+
 ## 1. Launch (EST 5 minutes)
 
 1. Download **Python 3.9+** (python.org). In the Windows installer, check the "Add Python to PATH" box.
