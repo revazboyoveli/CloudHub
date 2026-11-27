@@ -6,6 +6,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 
+type TgChannel = { id: string; title: string; type: string };
+
 export function ConnectTelegramDialog({
   open,
   onOpenChange,
@@ -15,14 +17,15 @@ export function ConnectTelegramDialog({
   onOpenChange: (o: boolean) => void;
   onConnected: () => void;
 }) {
-  const [step, setStep] = useState<"credentials" | "code">("credentials");
+  const [step, setStep] = useState<"credentials" | "code" | "channel">("credentials");
   const [apiId, setApiId] = useState("");
   const [apiHash, setApiHash] = useState("");
   const [phone, setPhone] = useState("");
-  const [channelId, setChannelId] = useState("me");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [need2fa, setNeed2fa] = useState(false);
+  const [channels, setChannels] = useState<TgChannel[]>([]);
+  const [selectedChannel, setSelectedChannel] = useState("me");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -31,8 +34,19 @@ export function ConnectTelegramDialog({
       setCode("");
       setPassword("");
       setNeed2fa(false);
+      setChannels([]);
+      setSelectedChannel("me");
     }
   }, [open]);
+
+  function proceedToChannels(list?: TgChannel[]) {
+    const items = list && list.length ? list : [{ id: "me", title: "Saved Messages", type: "saved" }];
+    setChannels(items);
+    // Pre-select the first actual channel if available, otherwise Saved Messages
+    const firstChannel = items.find((c) => c.type === "channel");
+    setSelectedChannel(firstChannel ? firstChannel.id : items[0].id);
+    setStep("channel");
+  }
 
   async function handleSendCode(e: React.FormEvent) {
     e.preventDefault();
@@ -46,12 +60,9 @@ export function ConnectTelegramDialog({
         api_id: Number(apiId.trim()),
         api_hash: apiHash.trim(),
         phone: phone.trim(),
-        channel_id: channelId.trim() || "me",
       });
-      if (res.status === "authorized") {
-        toast.success("Telegram connected successfully!");
-        onConnected();
-        onOpenChange(false);
+      if (res.status === "select_channel") {
+        proceedToChannels(res.channels);
       } else {
         toast.success("Verification code sent to your Telegram");
         setStep("code");
@@ -78,13 +89,26 @@ export function ConnectTelegramDialog({
       if (res.status === "2fa_required") {
         setNeed2fa(true);
         toast.info("2FA is enabled — please enter your cloud password");
-      } else {
-        toast.success("Telegram connected successfully!");
-        onConnected();
-        onOpenChange(false);
+      } else if (res.status === "select_channel") {
+        proceedToChannels(res.channels);
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Invalid verification code");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSaveChannel(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await api.telegramSelectChannel({ channel_id: selectedChannel });
+      toast.success("Telegram connected successfully!");
+      onConnected();
+      onOpenChange(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to select channel");
     } finally {
       setLoading(false);
     }
@@ -99,20 +123,26 @@ export function ConnectTelegramDialog({
             Connect Telegram
           </DialogTitle>
           <DialogDescription>
-            Get your API ID and API Hash from{" "}
-            <a
-              href="https://my.telegram.org"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 font-medium text-primary underline"
-            >
-              my.telegram.org <ExternalLink className="size-3" />
-            </a>
-            .
+            {step === "channel" ? (
+              "Choose which Telegram channel or chat to use as your cloud storage."
+            ) : (
+              <>
+                Get your API ID and API Hash from{" "}
+                <a
+                  href="https://my.telegram.org"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 font-medium text-primary underline"
+                >
+                  my.telegram.org <ExternalLink className="size-3" />
+                </a>
+                .
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
 
-        {step === "credentials" ? (
+        {step === "credentials" && (
           <form onSubmit={handleSendCode} className="grid gap-3 pt-1">
             <div className="grid gap-1.5">
               <label className="text-xs font-medium text-muted-foreground">API ID</label>
@@ -139,22 +169,14 @@ export function ConnectTelegramDialog({
                 placeholder="e.g. +995555123456"
               />
             </div>
-            <div className="grid gap-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
-                Channel ID (keep <code>me</code> for Saved Messages)
-              </label>
-              <Input
-                value={channelId}
-                onChange={(e) => setChannelId(e.target.value)}
-                placeholder="me or -1001234567890"
-              />
-            </div>
             <Button type="submit" disabled={loading} className="mt-2">
               {loading && <Loader2 className="mr-2 size-4 animate-spin" />}
               Send verification code
             </Button>
           </form>
-        ) : (
+        )}
+
+        {step === "code" && (
           <form onSubmit={handleVerify} className="grid gap-3 pt-1">
             <div className="grid gap-1.5">
               <label className="text-xs font-medium text-muted-foreground">Telegram verification code</label>
@@ -182,9 +204,32 @@ export function ConnectTelegramDialog({
               </Button>
               <Button type="submit" className="flex-1" disabled={loading}>
                 {loading && <Loader2 className="mr-2 size-4 animate-spin" />}
-                Verify & Connect
+                Continue
               </Button>
             </div>
+          </form>
+        )}
+
+        {step === "channel" && (
+          <form onSubmit={handleSaveChannel} className="grid gap-3 pt-1">
+            <div className="grid gap-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Select Storage Channel</label>
+              <select
+                value={selectedChannel}
+                onChange={(e) => setSelectedChannel(e.target.value)}
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {channels.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.title} {c.type === "channel" ? "(Channel)" : c.type === "group" ? "(Group)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Button type="submit" disabled={loading} className="mt-2">
+              {loading && <Loader2 className="mr-2 size-4 animate-spin" />}
+              Finish & Connect
+            </Button>
           </form>
         )}
       </DialogContent>

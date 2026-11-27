@@ -1,16 +1,20 @@
-# Python
-.venv/
-__pycache__/
-*.pyc
-
-# Database, local media & cache
-hub.db
-storage/
-.cache/
-
+# Secrets & Encrypted Vaults
+.env
+*.enc
 *.session
 *.session-journal
 tg_config.json
 gdrive_config.json
 gdrive_token.json
-.env
+
+# Database & Local Storage
+hub.db
+storage/
+thumbnails/
+
+# Environments & Build caches
+.venv/
+__pycache__/
+node_modules/
+.dkele25/
+*.mp4

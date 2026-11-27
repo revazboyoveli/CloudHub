@@ -86,13 +86,24 @@ export const api = {
   deleteFile: (id: number) => request<{ ok: true }>(`/api/files/${id}`, { method: "DELETE" }),
 
   // Telegram auth & import
-  telegramAuthStart: (body: { api_id: number; api_hash: string; phone: string; channel_id?: string }) =>
-    request<{ status: "code_sent" | "authorized" }>("/api/telegram/auth/start", {
+  telegramAuthStart: (body: { api_id: number; api_hash: string; phone: string }) =>
+    request<{
+      status: "code_sent" | "select_channel";
+      channels?: { id: string; title: string; type: string }[];
+    }>("/api/telegram/auth/start", {
       method: "POST",
       body: JSON.stringify(body),
     }),
   telegramAuthVerify: (body: { code: string; password?: string }) =>
-    request<{ status: "2fa_required" | "authorized" }>("/api/telegram/auth/verify", {
+    request<{
+      status: "2fa_required" | "select_channel";
+      channels?: { id: string; title: string; type: string }[];
+    }>("/api/telegram/auth/verify", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  telegramSelectChannel: (body: { channel_id: string }) =>
+    request<{ status: "authorized" }>("/api/telegram/auth/channel", {
       method: "POST",
       body: JSON.stringify(body),
     }),

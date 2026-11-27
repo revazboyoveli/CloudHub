@@ -1,4 +1,4 @@
-"""Telegram-ის საცავი (მაღალსიჩქარიანი ვიდეო სტრიმინგი: 1MB ბლოკები + 192MB RAM ქეში + 6x პარალელური Prefetch)."""
+"""Telegram storage backend (high-speed video streaming: 1MB chunks + 192MB RAM cache + 6x parallel prefetch)."""
 import asyncio
 from collections import OrderedDict
 import json
@@ -10,15 +10,17 @@ import threading
 from importlib.util import find_spec
 from pathlib import Path
 
+from crypto_vault import decrypt_json, encrypt_json
+
 BASE = Path(__file__).resolve().parent
 TG_DIR = Path(os.environ.get("HUB_TG_DIR", BASE))
-CONFIG = TG_DIR / "tg_config.json"
+CONFIG = TG_DIR / "tg_config.enc"
 SESSION = TG_DIR / "tg"
 
-CHUNK = 1024 * 1024         # 1 MB — Telegram MTProto-ს მაქსიმალური ბლოკი (2x ნაკლები დაყოვნება)
-PREFETCH = 8                # 8 MB წინასწარი ჩატვირთვა დაკვრის წინ
-MAX_CACHE_CHUNKS = 192      # 192 MB RAM ქეში (მთლიანი ვიდეოები თავსდება მეხსიერებაში)
-MAX_CONCURRENT_DL = 6       # მაქსიმუმ 6 პარალელური ნაკადი Telegram-იდან
+CHUNK = 1024 * 1024         # 1 MB — Telegram MTProto max block size
+PREFETCH = 8                # 8 MB prefetch before playback
+MAX_CACHE_CHUNKS = 192      # 192 MB RAM cache
+MAX_CONCURRENT_DL = 6       # Max 6 parallel download workers
 MAX_UPLOAD = 2 * 1024**3
 _BAD_CHARS = re.compile(r'[\\/:*?"<>|]')
 
@@ -38,10 +40,15 @@ class TelegramBackend:
         self._size_cache = {}
         self._chunk_cache = OrderedDict()
         self._inflight = {}
+        self._pending_client = None
+        self._pending_phone = ""
+        self._pending_hash = ""
+        self._pending_api_id = 0
+        self._pending_api_hash = ""
 
     @property
     def enabled(self):
-        if self._client is not None:
+        if self._client is not None and self._entity is not None:
             return True
         return (
             CONFIG.exists()
@@ -50,16 +57,16 @@ class TelegramBackend:
         )
 
     def _cfg(self):
-        return json.loads(CONFIG.read_text(encoding="utf-8"))
+        return decrypt_json(CONFIG)
 
     def _run(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
     def _ensure(self):
-        if self._client is not None:
+        if self._client is not None and self._entity is not None:
             return
         with self._lock:
-            if self._client is not None:
+            if self._client is not None and self._entity is not None:
                 return
             loop = asyncio.new_event_loop()
             threading.Thread(target=loop.run_forever, daemon=True, name="telegram-loop").start()
@@ -79,14 +86,14 @@ class TelegramBackend:
         await client.connect()
         if not await client.is_user_authorized():
             await client.disconnect()
-            raise RuntimeError("Telegram-ში არ ხარ შესული. გაუშვი:  python tg_login.py")
-        self._entity = await self._resolve(client, cfg["channel_id"])
+            raise RuntimeError("Not signed in to Telegram. Connect via the web UI or run: python tg_login.py")
+        self._entity = await self._resolve(client, cfg.get("channel_id", "me"))
         self._sem = asyncio.Semaphore(MAX_CONCURRENT_DL)
         self._client = client
 
     @staticmethod
     async def _resolve(client, cid):
-        if cid == "me":
+        if str(cid) == "me":
             return await client.get_entity("me")
         try:
             return await client.get_entity(int(cid))
@@ -143,7 +150,7 @@ class TelegramBackend:
             file_storage.save(path)
             size = os.path.getsize(path)
             if size > MAX_UPLOAD:
-                raise ValueError("ფაილი 2 GB-ზე დიდია, Telegram ასეთს არ იღებს")
+                raise ValueError("File exceeds Telegram's 2 GB upload limit")
             msg_id = self._run(self._send(path, filename, size))
         return str(msg_id), size
 
@@ -164,7 +171,7 @@ class TelegramBackend:
         if media is None:
             msg = await self._client.get_messages(self._entity, ids=msg_id)
             if msg is None or not getattr(msg, "media", None):
-                raise FileNotFoundError("შეტყობინება Telegram-ში ვერ მოიძებნა")
+                raise FileNotFoundError("Message not found in Telegram")
             media = msg.media
             self._media_cache[msg_id] = media
             doc = getattr(media, "document", None)
@@ -227,7 +234,7 @@ class TelegramBackend:
             if next_off < end_limit and (not doc_size or next_off < doc_size):
                 self._schedule_chunk(media, msg_id, next_off)
 
-        # .MOV / .MP4 ფაილის ბოლო 2 MB-ის წინასწარი ჩატვირთვა (moov სარჩევისთვის)
+        # Preload last 2 MB of .MOV / .MP4 files (for moov atom index)
         if warm_tail and doc_size > CHUNK * 2:
             last_aligned = ((doc_size - 1) // CHUNK) * CHUNK
             self._schedule_chunk(media, msg_id, last_aligned)
@@ -273,22 +280,23 @@ class TelegramBackend:
             threading.Thread(target=loop.run_forever, daemon=True, name="telegram-loop").start()
             self._loop = loop
 
-    def start_web_login(self, api_id: int, api_hash: str, phone: str, channel_id: str = "me") -> dict:
-        self._ensure_loop()
-        CONFIG.write_text(
-            json.dumps(
-                {
-                    "api_id": int(api_id),
-                    "api_hash": api_hash.strip(),
-                    "channel_id": (channel_id or "me").strip(),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        return self._run(self._web_send_code(int(api_id), api_hash.strip(), phone.strip(), (channel_id or "me").strip()))
+    @staticmethod
+    async def _fetch_channels(client) -> list[dict]:
+        channels = [{"id": "me", "title": "Saved Messages (Personal Cloud)", "type": "saved"}]
+        async for d in client.iter_dialogs():
+            if d.is_channel or d.is_group:
+                channels.append({
+                    "id": str(d.id),
+                    "title": d.name or f"Channel {d.id}",
+                    "type": "channel" if d.is_channel else "group",
+                })
+        return channels
 
-    async def _web_send_code(self, api_id: int, api_hash: str, phone: str, channel_id: str) -> dict:
+    def start_web_login(self, api_id: int, api_hash: str, phone: str) -> dict:
+        self._ensure_loop()
+        return self._run(self._web_send_code(int(api_id), api_hash.strip(), phone.strip()))
+
+    async def _web_send_code(self, api_id: int, api_hash: str, phone: str) -> dict:
         from telethon import TelegramClient
 
         if self._client is not None:
@@ -297,20 +305,28 @@ class TelegramBackend:
             except Exception:
                 pass
             self._client = None
+            self._entity = None
+
+        if self._pending_client is not None:
+            try:
+                await self._pending_client.disconnect()
+            except Exception:
+                pass
+            self._pending_client = None
 
         client = TelegramClient(str(SESSION), api_id, api_hash)
         await client.connect()
+        self._pending_client = client
+        self._pending_api_id = api_id
+        self._pending_api_hash = api_hash
+
         if await client.is_user_authorized():
-            self._entity = await self._resolve(client, channel_id)
-            self._sem = asyncio.Semaphore(MAX_CONCURRENT_DL)
-            self._client = client
-            return {"status": "authorized"}
+            channels = await self._fetch_channels(client)
+            return {"status": "select_channel", "channels": channels}
 
         sent = await client.send_code_request(phone)
-        self._pending_client = client
         self._pending_phone = phone
         self._pending_hash = sent.phone_code_hash
-        self._pending_channel = channel_id
         return {"status": "code_sent"}
 
     def finish_web_login(self, code: str, password: str = "") -> dict:
@@ -320,9 +336,9 @@ class TelegramBackend:
     async def _web_sign_in(self, code: str, password: str) -> dict:
         from telethon.errors import SessionPasswordNeededError
 
-        client = getattr(self, "_pending_client", None)
+        client = self._pending_client
         if client is None:
-            raise RuntimeError("ჯერ მოითხოვე დადასტურების კოდი")
+            raise RuntimeError("Please request a verification code first")
         try:
             await client.sign_in(
                 phone=self._pending_phone,
@@ -334,21 +350,31 @@ class TelegramBackend:
                 return {"status": "2fa_required"}
             await client.sign_in(password=password)
 
-        self._entity = await self._resolve(client, self._pending_channel)
+        channels = await self._fetch_channels(client)
+        return {"status": "select_channel", "channels": channels}
+
+    def select_web_channel(self, channel_id: str) -> dict:
+        self._ensure_loop()
+        return self._run(self._web_finalize_channel((channel_id or "me").strip()))
+
+    async def _web_finalize_channel(self, channel_id: str) -> dict:
+        client = self._pending_client or self._client
+        if client is None or not await client.is_user_authorized():
+            raise RuntimeError("Telegram session is not authorized")
+
+        self._entity = await self._resolve(client, channel_id)
         self._sem = asyncio.Semaphore(MAX_CONCURRENT_DL)
         self._client = client
         self._pending_client = None
-        return {"status": "authorized"}
 
-    def download_video_sample_for_thumb(self, ref: str) -> str | None:
-        fd, tmp_path = tempfile.mkstemp(suffix=".mp4")
-        os.close(fd)
-        try:
-            with open(tmp_path, "wb") as f:
-                for chunk in self.iter_bytes(ref, 0, 3 * 1024 * 1024):
-                    f.write(chunk)
-            return tmp_path
-        except Exception:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            return None
+        api_id = self._pending_api_id or (self._cfg().get("api_id") if CONFIG.exists() else 0)
+        api_hash = self._pending_api_hash or (self._cfg().get("api_hash") if CONFIG.exists() else "")
+        encrypt_json(
+            CONFIG,
+            {
+                "api_id": int(api_id),
+                "api_hash": api_hash,
+                "channel_id": channel_id,
+            },
+        )
+        return {"status": "authorized"}

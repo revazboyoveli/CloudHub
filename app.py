@@ -775,7 +775,6 @@ def api_telegram_auth_start():
             api_id=int(data["api_id"]),
             api_hash=data["api_hash"],
             phone=data["phone"],
-            channel_id=data.get("channel_id") or "me",
         )
         return jsonify(res)
     except Exception as e:  # noqa: BLE001
@@ -789,6 +788,18 @@ def api_telegram_auth_verify():
         res = BACKENDS["telegram"].finish_web_login(
             code=data.get("code", ""),
             password=data.get("password", ""),
+        )
+        return jsonify(res)
+    except Exception as e:  # noqa: BLE001
+        abort(400, f"Telegram: {e}")
+
+
+@app.post("/api/telegram/auth/channel")
+def api_telegram_auth_channel():
+    data = request.get_json(silent=True) or {}
+    try:
+        res = BACKENDS["telegram"].select_web_channel(
+            channel_id=str(data.get("channel_id") or "me"),
         )
         return jsonify(res)
     except Exception as e:  # noqa: BLE001
